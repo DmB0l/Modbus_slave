@@ -124,6 +124,12 @@ int main(void) {
 
         HAL_GPIO_TogglePin(GPIOC, LED_Pin); // Мигаем светодиодом для индикации работы
         HAL_Delay(100);
+
+        if(HAL_GetTick() - start_time > 5000) {
+        	HAL_UART_AbortReceive(&huart1);  // Аварийная остановка приема (если он был запущен)
+        	HAL_UART_Receive_IT(&huart1, rx_buffer, 8);      // Начинаем прием запросов
+        	start_time = HAL_GetTick();
+        }
     }
     /* USER CODE END 3 */
 }
@@ -262,7 +268,6 @@ void send_message(void) {
 //    if (HAL_UART_GetState(&huart1) == HAL_UART_STATE_READY) {
         HAL_GPIO_WritePin(GPIOA, DREnabled_Pin, GPIO_PIN_SET); // Переключаем в режим передачи
         HAL_UART_Transmit(&huart1, response_buffer, resp_length, 100); // Асинхронная отправка
-        HAL_Delay(10);
         HAL_GPIO_WritePin(GPIOA, DREnabled_Pin, GPIO_PIN_RESET); // Переключаем в режим передачи
 //    }
 }
