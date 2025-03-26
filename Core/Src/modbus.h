@@ -1,65 +1,61 @@
 #ifndef MODBUS_H
 #define MODBUS_H
 
-#include <cstdint>
-#include <vector>
+#include <stdint.h>
+#include <stdbool.h>
 
-#include "modbus_private.h"
-#include "modbus_reg.h"
-#include "modbus_settings.h"
-#include "modbus_constants.h"
+// Определение констант Modbus
+#define MODBUS_MAX_ADU_SIZE     256
+#define MODBUS_MIN_ADU_SIZE     4
+#define MODBUS_CRC_SIZE         2
 
-namespace ModBus{
-    class ModBusReg;
+// Коды функций Modbus
+#define FC_READ_COILS           0x01
+#define FC_READ_DISCRETE_INPUTS 0x02
+#define FC_READ_HOLDING_REG     0x03
+#define FC_READ_INPUT_REG       0x04
+#define FC_WRITE_SINGLE_COIL    0x05
+#define FC_WRITE_SINGLE_REG     0x06
+#define FC_WRITE_MULT_COILS     0x0F
+#define FC_WRITE_MULT_REG       0x10
 
-    /*!
-    \brief ModBusProperty
-    */
-    struct ModBusSlaveProperty{
-        void (*write_to_uart)(uint8_t *_data, uint32_t _size);
-        void (*analog_register_edit)(ModBusReg *const _reg, uint32_t _pos, uint32_t _size);
-        void (*discrete_register_edit)(ModBusReg *const _reg, uint32_t _pos, uint32_t _size);
+// Коды ошибок
+#define MODBUS_OK               0
+#define MODBUS_ERR_CRC          1
+#define MODBUS_ERR_FUNCTION     2
+#define MODBUS_ERR_ADDRESS      3
+#define MODBUS_ERR_VALUE        4
 
-        uint32_t d_out_size, d_input_size, a_out_size, a_input_size;
-        uint8_t address;
-    };
+// Структура Modbus фрейма
+typedef struct {
+    uint8_t slave_id;
+    uint8_t function_code;
+    uint16_t address;
+    uint16_t quantity;
+    uint8_t* data;
+    uint16_t data_length;
+} ModbusFrame;
 
-    /*!
-    \brief ModBusSlave
-    */
-    class ModBusSlave : public ModBusPrivate
-    {
-    public:
-        ModBusSlave(const ModBusSlaveProperty &_prop);
-        ModBusSlave(const ModBusSlaveProperty &&_prop);
-        ~ModBusSlave();
+// Структура для хранения регистров устройства
+typedef struct {
+    uint16_t* holding_registers;
+    uint16_t* input_registers;
+    bool* coils;
+    bool* discrete_inputs;
+    uint16_t num_holding_regs;
+    uint16_t num_input_regs;
+    uint16_t num_coils;
+    uint16_t num_discrete_inputs;
+} ModbusDevice;
 
-        std::vector<uint8_t> execute();
-        void write_command(uint8_t *_data, uint32_t _size);
-
-        ModBusReg *const modify_register();
-    private:
-        const ModBusSlaveProperty m_property;
-        ModBusReg *m_reg;
-
-        std::vector<uint8_t> m_input_buf;
-    };
-
-    /*!
-    \brief ModBusProperty
-    */
-    class ModBusMaster : public ModBusPrivate{
-    public:
-        ModBusMaster(uint8_t _address);
-
-        std::vector<uint8_t> read_register(ModBusReg::Register _reg, uint16_t _pos, uint16_t _count);
-        std::vector<uint8_t> write_single_register(ModBusReg::Register _reg, uint16_t _pos, uint16_t _value);
-        std::vector<uint8_t> write_multiple_register(ModBusReg::Register _reg, uint16_t _pos, std::vector<uint8_t> &&_data);
-    private:
-        uint8_t m_address;
-    };
-}
-
-
+// Прототипы функций
+ModbusDevice* modbus_init_device(uint16_t num_holding, uint16_t num_input,
+                                 uint16_t num_coils, uint16_t num_discrete);
+void modbus_free_device(ModbusDevice* device);
+int modbus_create_request(ModbusFrame* frame, uint8_t* buffer, uint16_t* length);
+int modbus_process_response(ModbusDevice* device, uint8_t* rx_buffer, uint16_t rx_length,
+                            uint8_t* tx_buffer, uint16_t* tx_length);
+uint16_t* modbus_parse_response(uint8_t* buffer, uint16_t length, uint16_t* value_count);
+void print_hex(uint8_t* buffer, uint16_t length);
 
 #endif // MODBUS_H
