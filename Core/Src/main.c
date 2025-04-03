@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "modbus.h"
+#include "flashmemory.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -32,12 +33,18 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define MODBUS_SILENT_PERIOD_MS 4  // 3.5 символа при 9600 бод ≈ 4 мс
+//#define FLASH_SIZE_KB           (*(__IO uint16_t *)(0x1FFFF7E0))  // Размер флеш в КБ
+//#define FLASH_PAGE_SIZE         ((FLASH_SIZE_KB <= 128) ? 1024 : 2048)  // Размер страницы в байтах
+//#define FLASH_END_ADDR          (0x08000000 + (FLASH_SIZE_KB * 1024) - 1)  // Конец флеш-памяти
+//#define FLASH_LAST_PAGE_ADDR    (FLASH_END_ADDR - FLASH_PAGE_SIZE + 1)  // Адрес последней страницы
+//#define FLASH_PAGE_SIZE         1024  // Размер страницы в байтах
+//#define FLASH_END_ADDR          0x08007FFF  // Конец флеш-памяти (для 64 КБ - 0x0800FFFF) (для 64 КБ - 0x08007FFF)
+//#define FLASH_LAST_PAGE_ADDR    (FLASH_END_ADDR - FLASH_PAGE_SIZE + 1)  // Адрес последней страницы: 0x0800FC00
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define FLASH_DATA_SIZE 52        // Максимальный размер данных для страницы из 1024 байт и чтения по 32 байта
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -45,8 +52,26 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-uint32_t start_time = 0;
 
+//--------ДЛЯ FLASH-------
+//------------------------
+//------------------------
+uint32_t flash_data[FLASH_DATA_SIZE];     // Данные из Flash памяти
+uint32_t now_offset = 0; 				  // Чисто для отладки, чтобы записывало разные числа
+
+//------ДЛЯ ТАЙМЕРОВ------
+//------------------------
+//------------------------
+uint32_t time_from_last_rxint = 0;
+uint32_t time_from_last_write_flash = 0;
+uint32_t time_from_last_read_flash = 0;
+//------------------------
+//------------------------
+//------------------------
+
+//------ДЛЯ MODBUS--------
+//------------------------
+//------------------------
 uint8_t rx_buffer[256];                // Буфер для приема запросов
 uint8_t rx_real_size = 0;
 uint8_t func_code = 0;
@@ -55,8 +80,9 @@ uint8_t response_buffer[MODBUS_MAX_ADU_SIZE];
 uint16_t resp_length;
 
 ModbusDevice *device = NULL;
-
-volatile uint8_t send_flag = 0;        // Флаг для отправки ответа
+//------------------------
+//------------------------
+//------------------------
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -68,6 +94,7 @@ static void MX_USART2_UART_Init(void);
 void Send_Message(void);
 void PrintHexArray8(const uint8_t *array, int length);
 void PrintHexArray16(const uint16_t *array, int length);
+void PrintHexArray32(const uint32_t *array, int length);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -106,11 +133,20 @@ int main(void) {
 	MX_USART2_UART_Init();
 	/* USER CODE BEGIN 2 */
 
-	start_time = HAL_GetTick();
+	time_from_last_read_flash = HAL_GetTick();
+	time_from_last_write_flash = HAL_GetTick();
+	time_from_last_rxint = HAL_GetTick();
 	device = modbus_init_device(100, 100, 100, 100); // Инициализация устройства Modbus
 
+	// УЖАСНАЯ БАГА С HAL_UART_Receive_IT
+	// ЕСЛИ ПОСТАВИТЬ Flash_Init до HAL_UART_Receive_IT, то прерывания НЕ ПРИХОДЯТ!
+	// Flash_Init();
+	// HAL_UART_Receive_IT(&huart1, rx_buffer, 8);      // Начинаем прием запросов
+	// HAL_GPIO_WritePin(GPIOA, DREnabled_Pin, GPIO_PIN_RESET);
 	HAL_UART_Receive_IT(&huart1, rx_buffer, 8);      // Начинаем прием запросов
 	HAL_GPIO_WritePin(GPIOA, DREnabled_Pin, GPIO_PIN_RESET);
+
+	Flash_Init();
 
 	/* USER CODE END 2 */
 
@@ -120,18 +156,36 @@ int main(void) {
 		/* USER CODE END WHILE */
 
 		/* USER CODE BEGIN 3 */
-//		if (send_flag) {
-//			Send_Message(); // Отправляем ответ, если флаг установлен
-//			send_flag = 0;
-//		}
-
-		HAL_GPIO_TogglePin(GPIOC, LED_Pin); // Мигаем светодиодом для индикации работы
-		HAL_Delay(100);
-
-		if (HAL_GetTick() - start_time > 5000) {
+		// Для перезапуска прерываний uart (если залагал)
+		if (HAL_GetTick() - time_from_last_rxint > 5000) {
 			HAL_UART_AbortReceive(&huart1);  // Аварийная остановка приема (если он был запущен)
 			HAL_UART_Receive_IT(&huart1, rx_buffer, 8);      // Начинаем прием запросов
-			start_time = HAL_GetTick();
+			time_from_last_rxint = HAL_GetTick();
+		}
+
+		// Для чтения из в flash каждую секунду
+		if (HAL_GetTick() - time_from_last_read_flash > 1000) {
+			time_from_last_read_flash = HAL_GetTick();
+
+			Flash_Read_Last_Page_32bit(flash_data, FLASH_DATA_SIZE);
+
+			printf("Read from flash: ");
+			PrintHexArray32(flash_data, FLASH_DATA_SIZE);
+		}
+
+		// Для записи в flash память через 5 секунд работы
+		if (HAL_GetTick() - time_from_last_write_flash > 60000) {
+			time_from_last_write_flash = HAL_GetTick();
+
+			for (uint32_t i = 0; i < FLASH_DATA_SIZE; i++) {
+				flash_data[i] = i + now_offset;
+			}
+			Flash_Write_Last_Page_32bit(flash_data, FLASH_DATA_SIZE);
+
+			printf("Write in flash: ");
+			PrintHexArray32(flash_data, FLASH_DATA_SIZE);
+
+			now_offset += 52;
 		}
 	}
 	/* USER CODE END 3 */
@@ -236,7 +290,8 @@ static void MX_GPIO_Init(void) {
 /* USER CODE BEGIN 4 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	if (huart == &huart1) {
-		start_time = HAL_GetTick();
+		HAL_GPIO_TogglePin(GPIOC, LED_Pin);
+		time_from_last_rxint = HAL_GetTick();
 		if (func_code == 0) {
 			func_code = rx_buffer[1];
 			if (func_code == 0x10 || func_code == 0x0F) {
@@ -281,23 +336,30 @@ void Send_Message(void) {
 }
 
 void PrintHexArray8(const uint8_t *array, int length) {
-    for (int i = 0; i < length; i++) {
-        printf("%02X ", array[i]); // %02X для HEX в верхнем регистре
-    }
-    printf("\n");
+	for (int i = 0; i < length; i++) {
+		printf("%02X ", array[i]); // %02X для HEX в верхнем регистре
+	}
+	printf("\n");
 }
 
 void PrintHexArray16(const uint16_t *array, int length) {
-	for (uint16_t i = 0; i < length; i++) {
-	    printf("%04X ", array[i]); // Вывод uint16_t в HEX
+	for (int i = 0; i < length; i++) {
+		printf("%04X ", array[i]); // Вывод uint16_t в HEX
+	}
+	printf("\n");
+}
+
+void PrintHexArray32(const uint32_t *array, int length) {
+	for (int i = 0; i < length; i++) {
+		printf("%08lX ", array[i]); // Используем %08lX для uint32_t
 	}
 	printf("\n");
 }
 
 // Перенаправление printf в UART2
 int _write(int file, uint8_t *ptr, int len) {  // Лучше использовать uint8_t*
-    HAL_UART_Transmit(&huart2, ptr, len, HAL_MAX_DELAY);
-    return len;
+	HAL_UART_Transmit(&huart2, ptr, len, HAL_MAX_DELAY);
+	return len;
 }
 
 /* USER CODE END 4 */
